@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Studio — Login</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="login-body">
+    <div class="login-card">
+        <div class="login-logo">
+            <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                <rect width="48" height="48" rx="12" fill="#4F46E5"/>
+                <path d="M14 12h14l6 6v18a2 2 0 01-2 2H14a2 2 0 01-2-2V14a2 2 0 012-2z" stroke="#fff" stroke-width="2" fill="none"/>
+                <path d="M28 12v6h6M18 24h12M18 28h12M18 32h8" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+            <h1>PDF Studio</h1>
+        </div>
+        <form id="loginForm">
+            <div class="form-group">
+                <label for="email">Email</label>
+                <input type="email" id="email" name="email" required autofocus placeholder="admin@pdfstudio.local">
+            </div>
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" required placeholder="Password">
+            </div>
+            <div id="loginError" class="error-msg hidden"></div>
+            <button type="submit" class="btn btn-primary btn-full">Sign In</button>
+        </form>
+    </div>
+    <script>
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const errEl = document.getElementById('loginError');
+            errEl.classList.add('hidden');
+
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+
+            try {
+                const resp = await fetch('/auth/login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({email, password})
+                });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    errEl.textContent = data.error || 'Login failed';
+                    errEl.classList.remove('hidden');
+                    return;
+                }
+                window.location.href = '/dashboard';
+            } catch (err) {
+                errEl.textContent = 'Network error';
+                errEl.classList.remove('hidden');
+            }
+        });
+    </script>
+</body>
+</html>

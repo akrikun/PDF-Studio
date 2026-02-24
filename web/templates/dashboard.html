@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Studio — Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">
+            <svg width="32" height="32" viewBox="0 0 48 48" fill="none">
+                <rect width="48" height="48" rx="12" fill="#4F46E5"/>
+                <path d="M14 12h14l6 6v18a2 2 0 01-2 2H14a2 2 0 01-2-2V14a2 2 0 012-2z" stroke="#fff" stroke-width="2" fill="none"/>
+                <path d="M28 12v6h6M18 24h12M18 28h12M18 32h8" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+            <span>PDF Studio</span>
+        </div>
+        <div class="nav-actions">
+            {{if .User.IsAdmin}}
+            <a href="/admin" class="btn btn-sm btn-outline">Admin Panel</a>
+            {{end}}
+            <span class="nav-user">{{.User.Email}} <span class="badge badge-{{.User.Role}}">{{.User.Role}}</span></span>
+            <button onclick="logout()" class="btn btn-sm btn-ghost">Logout</button>
+        </div>
+    </nav>
+
+    <main class="container">
+        <div class="page-header">
+            <h2>My Documents</h2>
+            <div class="header-actions">
+                <input type="text" id="searchInput" placeholder="Search documents..." class="input-search" oninput="searchDocuments()">
+                {{if .User.CanEdit}}
+                <button onclick="createDocument()" class="btn btn-primary">+ New Document</button>
+                {{end}}
+            </div>
+        </div>
+
+        <div id="documentsList" class="documents-grid">
+            <div class="loading">Loading documents...</div>
+        </div>
+
+        <!-- Document detail modal -->
+        <div id="docModal" class="modal hidden">
+            <div class="modal-overlay" onclick="closeModal()"></div>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3 id="modalTitle">Document</h3>
+                    <button onclick="closeModal()" class="btn-close">&times;</button>
+                </div>
+                <div id="modalBody" class="modal-body"></div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const userRole = '{{.User.Role}}';
+        const canEdit = userRole === 'admin' || userRole === 'editor';
+
+        async function api(url, opts = {}) {
+            const resp = await fetch(url, {
+                ...opts,
+                headers: {'Content-Type': 'application/json', ...opts.headers}
+            });
+            if (resp.status === 401) { window.location.href = '/login'; return null; }
+            return resp;
+        }
+
+        async function logout() {
+            await fetch('/auth/logout', {method: 'POST'});
+            window.location.href = '/login';
+        }
+
+        async function loadDocuments(q = '') {
+            const url = q ? `/api/documents?q=${encodeURIComponent(q)}` : '/api/documents';
+            const resp = await api(url);
+            const docs = await resp.json();
+            renderDocuments(docs);
+        }
+
+        function renderDocuments(docs) {
+            const el = document.getElementById('documentsList');
+            if (!docs || docs.length === 0) {
+                el.innerHTML = '<div class="empty-state"><p>No documents yet.</p>' +
+                    (canEdit ? '<button onclick="createDocument()" class="btn btn-primary">Create your first document</button>' : '') +
+                    '</div>';
+                return;
+            }
+            el.innerHTML = docs.map(doc => `
+                <div class="doc-card" onclick="openDocument('${doc.id}')">
+                    <div class="doc-card-icon">
+                        <svg width="40" height="40" viewBox="0 0 48 48" fill="none">
+                            <path d="M14 8h14l8 8v24a2 2 0 01-2 2H14a2 2 0 01-2-2V10a2 2 0 012-2z" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"/>
+                            <path d="M28 8v8h8" stroke="#4F46E5" stroke-width="1.5"/>
+                        </svg>
+                    </div>
+                    <div class="doc-card-body">
+                        <h4>${escapeHtml(doc.title)}</h4>
+                        <span class="doc-status badge badge-${doc.status}">${doc.status}</span>
+                        <time>${new Date(doc.updated_at).toLocaleDateString()}</time>
+                    </div>
+                    <div class="doc-card-actions">
+                        ${canEdit ? `<a href="/editor/${doc.id}" class="btn btn-sm btn-primary" onclick="event.stopPropagation()">Edit</a>` : ''}
+                        <button onclick="event.stopPropagation(); showDocDetail('${doc.id}')" class="btn btn-sm btn-outline">Details</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function escapeHtml(s) {
+            const d = document.createElement('div');
+            d.textContent = s;
+            return d.innerHTML;
+        }
+
+        let searchTimeout;
+        function searchDocuments() {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                loadDocuments(document.getElementById('searchInput').value);
+            }, 300);
+        }
+
+        async function createDocument() {
+            const title = prompt('Document title:', 'Untitled Document');
+            if (!title) return;
+            const resp = await api('/api/documents', {
+                method: 'POST',
+                body: JSON.stringify({title})
+            });
+            if (resp.ok) {
+                const data = await resp.json();
+                window.location.href = '/editor/' + data.document.id;
+            }
+        }
+
+        function openDocument(id) {
+            window.location.href = '/editor/' + id;
+        }
+
+        function closeModal() {
+            document.getElementById('docModal').classList.add('hidden');
+        }
+
+        async function showDocDetail(docId) {
+            const resp = await api(`/api/documents/${docId}`);
+            const data = await resp.json();
+            const doc = data.document;
+            const versions = data.versions || [];
+            const files = data.files || [];
+
+            document.getElementById('modalTitle').textContent = doc.title;
+
+            const pdfs = files.filter(f => f.kind === 'generated_pdf');
+            const uploads = files.filter(f => f.kind !== 'generated_pdf');
+
+            document.getElementById('modalBody').innerHTML = `
+                <div class="detail-section">
+                    <h4>Info</h4>
+                    <p>Status: <span class="badge badge-${doc.status}">${doc.status}</span></p>
+                    <p>Created: ${new Date(doc.created_at).toLocaleString()}</p>
+                    <p>Updated: ${new Date(doc.updated_at).toLocaleString()}</p>
+                </div>
+                <div class="detail-section">
+                    <h4>Versions (${versions.length})</h4>
+                    ${versions.map(v => `<div class="version-item">v${v.version_num} — ${new Date(v.created_at).toLocaleString()}</div>`).join('')}
+                </div>
+                <div class="detail-section">
+                    <h4>Generated PDFs (${pdfs.length})</h4>
+                    ${pdfs.map(f => `<div class="file-item"><a href="/api/files/${f.id}/download">${escapeHtml(f.original_name)}</a> <span class="file-size">${formatSize(f.size)}</span></div>`).join('') || '<p class="muted">No PDFs generated yet.</p>'}
+                </div>
+                <div class="detail-section">
+                    <h4>Uploaded Files (${uploads.length})</h4>
+                    ${uploads.map(f => `<div class="file-item"><a href="/api/files/${f.id}/download">${escapeHtml(f.original_name)}</a> <span class="file-size">${formatSize(f.size)}</span></div>`).join('') || '<p class="muted">No files uploaded.</p>'}
+                </div>
+                ${canEdit ? `
+                <div class="detail-section">
+                    <button onclick="deleteDocument('${doc.id}')" class="btn btn-danger btn-sm">Delete Document</button>
+                </div>` : ''}
+            `;
+
+            document.getElementById('docModal').classList.remove('hidden');
+        }
+
+        async function deleteDocument(id) {
+            if (!confirm('Are you sure you want to delete this document?')) return;
+            await api(`/api/documents/${id}`, {method: 'DELETE'});
+            closeModal();
+            loadDocuments();
+        }
+
+        function formatSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / 1048576).toFixed(1) + ' MB';
+        }
+
+        loadDocuments();
+    </script>
+</body>
+</html>

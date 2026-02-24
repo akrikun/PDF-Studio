@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Studio — Editor</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/editor.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">
+            <a href="/dashboard" class="btn btn-sm btn-ghost">&larr; Back</a>
+            <span id="docTitle" class="editable-title" onclick="renameDocument()" title="Click to rename">Loading...</span>
+        </div>
+        <div class="nav-actions">
+            {{if .User.CanEdit}}
+            <button onclick="savePage()" class="btn btn-sm btn-outline" id="saveBtn">Save</button>
+            <button onclick="generatePDF()" class="btn btn-sm btn-primary" id="pdfBtn">Generate PDF</button>
+            <button onclick="toggleStatus()" class="btn btn-sm btn-outline" id="statusBtn">...</button>
+            <button onclick="uploadFile()" class="btn btn-sm btn-outline">Upload File</button>
+            <button onclick="createVersion()" class="btn btn-sm btn-ghost">New Version</button>
+            {{end}}
+            <span class="nav-user">{{.User.Email}}</span>
+            <button onclick="logout()" class="btn btn-sm btn-ghost">Logout</button>
+        </div>
+    </nav>
+
+    <div class="editor-layout">
+        <!-- Sidebar -->
+        <aside class="editor-sidebar">
+            <div class="sidebar-section">
+                <h4>Pages</h4>
+                {{if .User.CanEdit}}
+                <button onclick="addPage()" class="btn btn-sm btn-outline btn-full">+ Add Page</button>
+                {{end}}
+                <div id="pageList" class="page-list"></div>
+            </div>
+            <div class="sidebar-section">
+                <h4>Versions</h4>
+                <div id="versionList" class="version-list"></div>
+            </div>
+            <div class="sidebar-section">
+                <h4>Files</h4>
+                <div id="fileList" class="file-list"></div>
+            </div>
+        </aside>
+
+        <!-- Main editor area -->
+        <div class="editor-main">
+            <div class="editor-canvas" id="editorCanvas">
+                <div class="a4-page" id="pageEditor">
+                    {{if .User.CanEdit}}
+                    <div class="page-content" id="pageContent" contenteditable="true"></div>
+                    {{else}}
+                    <div class="page-content" id="pageContent" contenteditable="false"></div>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+
+        <!-- Toolbar (for editors) -->
+        {{if .User.CanEdit}}
+        <div class="editor-toolbar">
+            <div class="toolbar-group">
+                <button onclick="execCmd('bold')" title="Bold" class="tb-btn"><b>B</b></button>
+                <button onclick="execCmd('italic')" title="Italic" class="tb-btn"><i>I</i></button>
+                <button onclick="execCmd('underline')" title="Underline" class="tb-btn"><u>U</u></button>
+                <button onclick="execCmd('strikeThrough')" title="Strikethrough" class="tb-btn"><s>S</s></button>
+            </div>
+            <div class="toolbar-group">
+                <button onclick="execCmd('formatBlock','<h1>')" title="Heading 1" class="tb-btn">H1</button>
+                <button onclick="execCmd('formatBlock','<h2>')" title="Heading 2" class="tb-btn">H2</button>
+                <button onclick="execCmd('formatBlock','<h3>')" title="Heading 3" class="tb-btn">H3</button>
+                <button onclick="execCmd('formatBlock','<p>')" title="Paragraph" class="tb-btn">P</button>
+            </div>
+            <div class="toolbar-group">
+                <button onclick="execCmd('insertUnorderedList')" title="Bullet list" class="tb-btn">&#8226; List</button>
+                <button onclick="execCmd('insertOrderedList')" title="Numbered list" class="tb-btn">1. List</button>
+                <button onclick="execCmd('indent')" title="Indent" class="tb-btn">&rarr;|</button>
+                <button onclick="execCmd('outdent')" title="Outdent" class="tb-btn">|&larr;</button>
+            </div>
+            <div class="toolbar-group">
+                <button onclick="execCmd('justifyLeft')" title="Align left" class="tb-btn">&#8676;</button>
+                <button onclick="execCmd('justifyCenter')" title="Align center" class="tb-btn">&#8633;</button>
+                <button onclick="execCmd('justifyRight')" title="Align right" class="tb-btn">&#8677;</button>
+            </div>
+            <div class="toolbar-group">
+                <button onclick="insertLink()" title="Insert link" class="tb-btn">Link</button>
+                <button onclick="insertImage()" title="Insert image" class="tb-btn">Img</button>
+                <button onclick="insertTable()" title="Insert table" class="tb-btn">Table</button>
+                <button onclick="insertHR()" title="Insert divider" class="tb-btn">&#8213;</button>
+            </div>
+            <div class="toolbar-group">
+                <select onchange="changeFontSize(this.value)" class="tb-select">
+                    <option value="">Size</option>
+                    <option value="1">Small</option>
+                    <option value="3">Normal</option>
+                    <option value="5">Large</option>
+                    <option value="7">Huge</option>
+                </select>
+            </div>
+        </div>
+        {{end}}
+    </div>
+
+    <input type="file" id="fileInput" style="display:none" onchange="handleFileUpload(event)">
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script>
+        const canEdit = {{.User.CanEdit}};
+        const docId = window.location.pathname.split('/editor/')[1];
+        let currentVersionId = null;
+        let currentPageId = null;
+        let pages = [];
+        let dirty = false;
+        let docStatus = 'draft';
+
+        async function api(url, opts = {}) {
+            const resp = await fetch(url, {
+                ...opts,
+                headers: {'Content-Type': 'application/json', ...opts.headers}
+            });
+            if (resp.status === 401) { window.location.href = '/login'; return null; }
+            return resp;
+        }
+
+        async function logout() {
+            await fetch('/auth/logout', {method: 'POST'});
+            window.location.href = '/login';
+        }
+
+        function toast(msg, type = 'info') {
+            const el = document.getElementById('toast');
+            el.textContent = msg;
+            el.className = 'toast toast-' + type;
+            setTimeout(() => el.classList.add('hidden'), 3000);
+        }
+
+        function updateStatusBtn() {
+            const btn = document.getElementById('statusBtn');
+            if (!btn) return;
+            if (docStatus === 'published') {
+                btn.textContent = 'To Draft';
+                btn.className = 'btn btn-sm btn-outline';
+            } else {
+                btn.textContent = 'Publish';
+                btn.className = 'btn btn-sm btn-success';
+            }
+        }
+
+        async function toggleStatus() {
+            const newStatus = docStatus === 'published' ? 'draft' : 'published';
+            const resp = await api(`/api/documents/${docId}`, {
+                method: 'PUT',
+                body: JSON.stringify({status: newStatus})
+            });
+            if (resp && resp.ok) {
+                docStatus = newStatus;
+                updateStatusBtn();
+                toast(newStatus === 'published' ? 'Document published' : 'Returned to draft', 'success');
+            } else {
+                toast('Failed to change status', 'error');
+            }
+        }
+
+        async function renameDocument() {
+            if (!canEdit) return;
+            const current = document.getElementById('docTitle').textContent;
+            const title = prompt('Rename document:', current);
+            if (!title || title === current) return;
+            const resp = await api(`/api/documents/${docId}`, {
+                method: 'PUT',
+                body: JSON.stringify({title})
+            });
+            if (resp && resp.ok) {
+                document.getElementById('docTitle').textContent = title;
+                document.title = `PDF Studio — ${title}`;
+                toast('Document renamed', 'success');
+            } else {
+                toast('Rename failed', 'error');
+            }
+        }
+
+        // Load document
+        async function loadDocument() {
+            const resp = await api(`/api/documents/${docId}`);
+            if (!resp || !resp.ok) { window.location.href = '/dashboard'; return; }
+            const data = await resp.json();
+
+            document.getElementById('docTitle').textContent = data.document.title;
+            document.title = `PDF Studio — ${data.document.title}`;
+
+            docStatus = data.document.status;
+            updateStatusBtn();
+
+            // Versions
+            const versions = data.versions || [];
+            renderVersions(versions);
+
+            // Use latest version
+            if (versions.length > 0) {
+                currentVersionId = versions[0].id;
+                await loadPages();
+            }
+
+            // Files
+            renderFiles(data.files || []);
+        }
+
+        function renderVersions(versions) {
+            const el = document.getElementById('versionList');
+            el.innerHTML = versions.map(v => `
+                <div class="version-item ${v.id === currentVersionId ? 'active' : ''}"
+                     onclick="switchVersion('${v.id}')">
+                    v${v.version_num} <time>${new Date(v.created_at).toLocaleDateString()}</time>
+                </div>
+            `).join('');
+        }
+
+        function renderFiles(files) {
+            const el = document.getElementById('fileList');
+            if (!files.length) {
+                el.innerHTML = '<p class="muted small">No files</p>';
+                return;
+            }
+            el.innerHTML = files.map(f => `
+                <div class="file-item">
+                    <a href="/api/files/${f.id}/download" title="${f.original_name}">
+                        ${f.kind === 'generated_pdf' ? '&#128196;' : '&#128206;'}
+                        ${truncate(f.original_name, 20)}
+                    </a>
+                </div>
+            `).join('');
+        }
+
+        function truncate(s, n) {
+            return s.length > n ? s.substring(0, n) + '...' : s;
+        }
+
+        async function loadPages() {
+            if (!currentVersionId) return;
+            const resp = await api(`/api/versions/${currentVersionId}/pages`);
+            pages = await resp.json();
+            renderPageList();
+            if (pages.length > 0) {
+                selectPage(pages[0].id);
+            }
+        }
+
+        function stripHtml(html) {
+            const tmp = document.createElement('div');
+            tmp.innerHTML = html;
+            // Remove all images, tables, hrs so they don't render in thumbnails
+            tmp.querySelectorAll('img, table, hr, svg, video, iframe').forEach(el => el.remove());
+            return (tmp.textContent || tmp.innerText || '').trim().substring(0, 80);
+        }
+
+        function renderPageList() {
+            const el = document.getElementById('pageList');
+            el.innerHTML = pages.map((p, i) => `
+                <div class="page-thumb ${p.id === currentPageId ? 'active' : ''}"
+                     onclick="selectPage('${p.id}')" draggable="${canEdit}">
+                    <span class="page-num">${i + 1}</span>
+                    <div class="page-preview">${stripHtml(p.content_html) || '(empty page)'}</div>
+                    ${canEdit && pages.length > 1 ? `<button onclick="event.stopPropagation(); deletePage('${p.id}')" class="btn-close-sm">&times;</button>` : ''}
+                </div>
+            `).join('');
+        }
+
+        // Flush current page content into the local pages array (sync, no network)
+        function flushCurrentPage() {
+            if (!currentPageId || !canEdit) return;
+            const html = document.getElementById('pageContent').innerHTML;
+            const page = pages.find(p => p.id === currentPageId);
+            if (page) page.content_html = html;
+        }
+
+        async function selectPage(pageId) {
+            if (pageId === currentPageId) return;
+            // Auto-save previous page before switching
+            if (dirty && currentPageId && canEdit) {
+                await savePage();
+            }
+            currentPageId = pageId;
+            const page = pages.find(p => p.id === pageId);
+            if (page) {
+                document.getElementById('pageContent').innerHTML = page.content_html;
+            }
+            dirty = false;
+            renderPageList();
+        }
+
+        let saving = false;
+        async function savePage() {
+            if (!currentPageId || !canEdit || saving) return;
+            saving = true;
+            const btn = document.getElementById('saveBtn');
+            if (btn) btn.textContent = 'Saving...';
+            const html = document.getElementById('pageContent').innerHTML;
+            try {
+                const resp = await api(`/api/pages/${currentPageId}`, {
+                    method: 'PUT',
+                    body: JSON.stringify({content_html: html})
+                });
+                if (resp && resp.ok) {
+                    const page = pages.find(p => p.id === currentPageId);
+                    if (page) page.content_html = html;
+                    dirty = false;
+                    toast('Page saved', 'success');
+                    renderPageList();
+                } else {
+                    toast('Save failed', 'error');
+                }
+            } catch (e) {
+                toast('Save failed', 'error');
+            }
+            saving = false;
+            if (btn) btn.textContent = 'Save';
+        }
+
+        // Auto-save every 3 seconds when there are unsaved changes
+        let autoSaveTimer = null;
+        function scheduleAutoSave() {
+            if (autoSaveTimer) return;
+            autoSaveTimer = setInterval(() => {
+                if (dirty && currentPageId && canEdit && !saving) {
+                    savePage();
+                }
+            }, 3000);
+        }
+
+        async function addPage() {
+            if (dirty && currentPageId) await savePage();
+            const resp = await api(`/api/versions/${currentVersionId}/pages`, {
+                method: 'POST',
+                body: JSON.stringify({content_html: '<p>New page</p>'})
+            });
+            if (resp && resp.ok) {
+                await loadPages();
+                // Select the new (last) page
+                await selectPage(pages[pages.length - 1].id);
+                toast('Page added', 'success');
+            }
+        }
+
+        async function deletePage(pageId) {
+            if (!confirm('Delete this page?')) return;
+            await api(`/api/pages/${pageId}`, {method: 'DELETE'});
+            await loadPages();
+            toast('Page deleted', 'success');
+        }
+
+        async function switchVersion(versionId) {
+            if (dirty && currentPageId) await savePage();
+            currentVersionId = versionId;
+            currentPageId = null;
+            await loadPages();
+        }
+
+        async function createVersion() {
+            if (dirty) await savePage();
+            const resp = await api(`/api/documents/${docId}/versions`, {method: 'POST'});
+            if (resp && resp.ok) {
+                toast('New version created', 'success');
+                await loadDocument();
+            }
+        }
+
+        async function generatePDF() {
+            if (dirty) await savePage();
+            const btn = document.getElementById('pdfBtn');
+            btn.disabled = true;
+            btn.textContent = 'Generating...';
+            try {
+                const resp = await api(`/api/documents/${docId}/generate-pdf`, {method: 'POST'});
+                const data = await resp.json();
+                if (resp.ok) {
+                    toast('PDF generated!', 'success');
+                    loadDocument(); // refresh files
+                } else {
+                    toast('PDF error: ' + (data.error || 'unknown'), 'error');
+                }
+            } catch (e) {
+                toast('PDF generation failed', 'error');
+            }
+            btn.disabled = false;
+            btn.textContent = 'Generate PDF';
+        }
+
+        function uploadFile() {
+            document.getElementById('fileInput').click();
+        }
+
+        async function handleFileUpload(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('document_id', docId);
+            if (currentVersionId) formData.append('version_id', currentVersionId);
+            formData.append('kind', 'asset');
+
+            const resp = await fetch('/api/files/upload', {method: 'POST', body: formData});
+            if (resp.ok) {
+                const data = await resp.json();
+                toast('File uploaded', 'success');
+                loadDocument();
+                // If image, offer to insert
+                if (file.type.startsWith('image/')) {
+                    if (confirm('Insert image into current page?')) {
+                        const url = `/api/files/${data.id}/download`;
+                        document.execCommand('insertHTML', false,
+                            `<img src="${url}" alt="${file.name}" style="max-width:100%">`);
+                        dirty = true;
+                    }
+                }
+            } else {
+                toast('Upload failed', 'error');
+            }
+            e.target.value = '';
+        }
+
+        // Toolbar commands
+        function execCmd(cmd, val = null) {
+            document.execCommand(cmd, false, val);
+            document.getElementById('pageContent').focus();
+            dirty = true;
+        }
+
+        function changeFontSize(val) {
+            if (val) execCmd('fontSize', val);
+        }
+
+        function insertLink() {
+            const url = prompt('Enter URL:');
+            if (url) execCmd('createLink', url);
+        }
+
+        function insertImage() {
+            const url = prompt('Enter image URL (or upload a file first):');
+            if (url) execCmd('insertImage', url);
+        }
+
+        function insertTable() {
+            const rows = parseInt(prompt('Number of rows:', '3')) || 3;
+            const cols = parseInt(prompt('Number of columns:', '3')) || 3;
+            let html = '<table>';
+            for (let r = 0; r < rows; r++) {
+                html += '<tr>';
+                for (let c = 0; c < cols; c++) {
+                    html += r === 0 ? '<th>Header</th>' : '<td>Cell</td>';
+                }
+                html += '</tr>';
+            }
+            html += '</table>';
+            document.execCommand('insertHTML', false, html);
+            dirty = true;
+        }
+
+        function insertHR() {
+            document.execCommand('insertHTML', false, '<hr>');
+            dirty = true;
+        }
+
+        // Track dirty state
+        if (canEdit) {
+            document.getElementById('pageContent').addEventListener('input', () => { dirty = true; });
+        }
+
+        // Auto-save on Ctrl+S
+        document.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                e.preventDefault();
+                savePage();
+            }
+        });
+
+        // Warn before leaving with unsaved changes
+        window.addEventListener('beforeunload', (e) => {
+            if (dirty) {
+                e.preventDefault();
+                e.returnValue = '';
+            }
+        });
+
+        loadDocument();
+        if (canEdit) scheduleAutoSave();
+    </script>
+</body>
+</html>

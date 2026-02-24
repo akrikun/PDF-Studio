@@ -1,0 +1,56 @@
+version: "3.9"
+
+services:
+  app:
+    build: .
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gotenberg:
+        condition: service_started
+    volumes:
+      - app_uploads:/data/uploads
+      - app_pdfs:/data/pdfs
+    restart: unless-stopped
+    networks:
+      - internal
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER:-pdfstudio}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-pdfstudio_secret}
+      POSTGRES_DB: ${DB_NAME:-pdfstudio}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-pdfstudio}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - internal
+
+  gotenberg:
+    image: gotenberg/gotenberg:8.5.1
+    command:
+      - "gotenberg"
+      - "--api-timeout=60s"
+      - "--chromium-disable-javascript=true"
+      - "--chromium-allow-list=file:///tmp/.*"
+    restart: unless-stopped
+    networks:
+      - internal
+
+volumes:
+  pg_data:
+  app_uploads:
+  app_pdfs:
+
+networks:
+  internal:
+    driver: bridge
