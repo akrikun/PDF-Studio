@@ -42,6 +42,9 @@
             </div>
             <div class="sidebar-section">
                 <h4>Files</h4>
+                {{if .User.CanEdit}}
+                <button onclick="spreadImagesToPages()" class="btn btn-sm btn-outline btn-full" id="spreadImagesBtn" style="display:none">Images → Pages</button>
+                {{end}}
                 <div id="fileList" class="file-list"></div>
             </div>
         </aside>
@@ -104,7 +107,7 @@
         {{end}}
     </div>
 
-    <input type="file" id="fileInput" style="display:none" onchange="handleFileUpload(event)">
+    <input type="file" id="fileInput" style="display:none" multiple onchange="handleFileUpload(event)">
 
     <div id="toast" class="toast hidden"></div>
 
@@ -219,20 +222,57 @@
             `).join('');
         }
 
+        let currentFiles = [];
+
         function renderFiles(files) {
+            currentFiles = files;
             const el = document.getElementById('fileList');
+            const spreadBtn = document.getElementById('spreadImagesBtn');
             if (!files.length) {
                 el.innerHTML = '<p class="muted small">No files</p>';
+                if (spreadBtn) spreadBtn.style.display = 'none';
                 return;
             }
+            const hasImages = files.some(f => f.mime && f.mime.startsWith('image/'));
+            if (spreadBtn) spreadBtn.style.display = hasImages ? '' : 'none';
+
             el.innerHTML = files.map(f => `
                 <div class="file-item">
                     <a href="/api/files/${f.id}/download" title="${f.original_name}">
-                        ${f.kind === 'generated_pdf' ? '&#128196;' : '&#128206;'}
+                        ${f.kind === 'generated_pdf' ? '&#128196;' : (f.mime && f.mime.startsWith('image/') ? '&#128247;' : '&#128206;')}
                         ${truncate(f.original_name, 20)}
                     </a>
+                    ${canEdit && f.mime && f.mime.startsWith('image/') ? `<button onclick="insertFileImage('${f.id}', '${f.original_name.replace(/'/g, "\\'")}')" class="btn-close-sm" title="Insert into page">+</button>` : ''}
                 </div>
             `).join('');
+        }
+
+        function insertFileImage(fileId, name) {
+            const url = `/api/files/${fileId}/download`;
+            document.execCommand('insertHTML', false,
+                `<img src="${url}" alt="${name}" style="max-width:100%">`);
+            dirty = true;
+        }
+
+        async function spreadImagesToPages() {
+            const images = currentFiles.filter(f => f.mime && f.mime.startsWith('image/') && f.kind !== 'generated_pdf');
+            if (!images.length) { toast('No images found', 'error'); return; }
+            if (!confirm(`Create ${images.length} new page(s), one per image?`)) return;
+
+            if (dirty && currentPageId) await savePage();
+            for (const img of images) {
+                const url = `/api/files/${img.id}/download`;
+                const html = `<p><img src="${url}" alt="${img.original_name}" style="max-width:100%"></p>`;
+                const resp = await api(`/api/versions/${currentVersionId}/pages`, {
+                    method: 'POST',
+                    body: JSON.stringify({content_html: html})
+                });
+                if (!resp || !resp.ok) {
+                    toast(`Failed to create page for ${img.original_name}`, 'error');
+                }
+            }
+            await loadPages();
+            toast(`${images.length} page(s) created`, 'success');
         }
 
         function truncate(s, n) {
@@ -393,33 +433,70 @@
             document.getElementById('fileInput').click();
         }
 
-        async function handleFileUpload(e) {
-            const file = e.target.files[0];
-            if (!file) return;
+        async function uploadSingleFile(file) {
             const formData = new FormData();
             formData.append('file', file);
             formData.append('document_id', docId);
             if (currentVersionId) formData.append('version_id', currentVersionId);
             formData.append('kind', 'asset');
-
             const resp = await fetch('/api/files/upload', {method: 'POST', body: formData});
-            if (resp.ok) {
-                const data = await resp.json();
-                toast('File uploaded', 'success');
-                loadDocument();
-                // If image, offer to insert
-                if (file.type.startsWith('image/')) {
-                    if (confirm('Insert image into current page?')) {
-                        const url = `/api/files/${data.id}/download`;
-                        document.execCommand('insertHTML', false,
-                            `<img src="${url}" alt="${file.name}" style="max-width:100%">`);
-                        dirty = true;
-                    }
+            if (!resp.ok) return null;
+            return await resp.json();
+        }
+
+        async function handleFileUpload(e) {
+            const files = Array.from(e.target.files);
+            if (!files.length) return;
+
+            const uploaded = [];
+            for (const file of files) {
+                const data = await uploadSingleFile(file);
+                if (data) {
+                    uploaded.push({data, file});
+                } else {
+                    toast(`Failed to upload ${file.name}`, 'error');
                 }
-            } else {
-                toast('Upload failed', 'error');
+            }
+
+            if (uploaded.length === 0) { e.target.value = ''; return; }
+            toast(`${uploaded.length} file(s) uploaded`, 'success');
+            loadDocument();
+
+            const images = uploaded.filter(u => u.file.type.startsWith('image/'));
+            if (images.length > 0) {
+                const choice = images.length > 1
+                    ? prompt(`${images.length} images uploaded. Choose:\n1 — Insert all into current page\n2 — Each image on a separate page\n3 — Do nothing`, '1')
+                    : (confirm('Insert image into current page?') ? '1' : '3');
+
+                if (choice === '1') {
+                    for (const img of images) {
+                        const url = `/api/files/${img.data.id}/download`;
+                        document.execCommand('insertHTML', false,
+                            `<img src="${url}" alt="${img.file.name}" style="max-width:100%"><br>`);
+                    }
+                    dirty = true;
+                } else if (choice === '2') {
+                    await placeImagesOnSeparatePages(images);
+                }
             }
             e.target.value = '';
+        }
+
+        async function placeImagesOnSeparatePages(images) {
+            if (dirty && currentPageId) await savePage();
+            for (const img of images) {
+                const url = `/api/files/${img.data.id}/download`;
+                const html = `<p><img src="${url}" alt="${img.file.name}" style="max-width:100%"></p>`;
+                const resp = await api(`/api/versions/${currentVersionId}/pages`, {
+                    method: 'POST',
+                    body: JSON.stringify({content_html: html})
+                });
+                if (!resp || !resp.ok) {
+                    toast(`Failed to create page for ${img.file.name}`, 'error');
+                }
+            }
+            await loadPages();
+            toast(`${images.length} page(s) created`, 'success');
         }
 
         // Toolbar commands
@@ -464,9 +541,83 @@
             dirty = true;
         }
 
+        // Handle paste with images (single image from clipboard)
+        async function handlePaste(e) {
+            const items = e.clipboardData ? e.clipboardData.items : null;
+            if (!items) return;
+
+            for (const item of items) {
+                if (item.kind === 'file' && item.type.startsWith('image/')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const file = item.getAsFile();
+                    if (!file) continue;
+
+                    const data = await uploadSingleFile(file);
+                    if (data) {
+                        const url = `/api/files/${data.id}/download`;
+                        document.execCommand('insertHTML', false,
+                            `<img src="${url}" alt="${file.name}" style="max-width:100%">`);
+                        dirty = true;
+                        loadDocument();
+                    } else {
+                        toast('Upload failed', 'error');
+                    }
+                    return;
+                }
+            }
+        }
+
+        // Handle drop with multiple images
+        async function handleDrop(e) {
+            const files = e.dataTransfer ? Array.from(e.dataTransfer.files) : [];
+            const imageFiles = files.filter(f => f.type.startsWith('image/'));
+            if (imageFiles.length === 0) return;
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            const uploaded = [];
+            for (const file of imageFiles) {
+                const data = await uploadSingleFile(file);
+                if (data) {
+                    uploaded.push({data, file});
+                } else {
+                    toast(`Failed to upload ${file.name}`, 'error');
+                }
+            }
+            if (uploaded.length === 0) return;
+            toast(`${uploaded.length} image(s) uploaded`, 'success');
+
+            if (uploaded.length > 1) {
+                const choice = prompt(`${uploaded.length} images dropped. Choose:\n1 — Insert all into current page\n2 — Each image on a separate page\n3 — Do nothing`, '1');
+                if (choice === '1') {
+                    for (const img of uploaded) {
+                        const url = `/api/files/${img.data.id}/download`;
+                        document.execCommand('insertHTML', false,
+                            `<img src="${url}" alt="${img.file.name}" style="max-width:100%"><br>`);
+                    }
+                    dirty = true;
+                } else if (choice === '2') {
+                    await placeImagesOnSeparatePages(uploaded);
+                }
+            } else {
+                const img = uploaded[0];
+                const url = `/api/files/${img.data.id}/download`;
+                document.execCommand('insertHTML', false,
+                    `<img src="${url}" alt="${img.file.name}" style="max-width:100%">`);
+                dirty = true;
+            }
+            loadDocument();
+        }
+
         // Track dirty state
         if (canEdit) {
-            document.getElementById('pageContent').addEventListener('input', () => { dirty = true; });
+            const pageContent = document.getElementById('pageContent');
+            pageContent.addEventListener('input', () => { dirty = true; });
+            pageContent.addEventListener('paste', handlePaste);
+            pageContent.addEventListener('dragover', (e) => { e.preventDefault(); });
+            pageContent.addEventListener('drop', handleDrop);
         }
 
         // Auto-save on Ctrl+S
